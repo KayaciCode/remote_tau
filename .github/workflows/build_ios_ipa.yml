@@ -1,0 +1,34 @@
+name: Build iOS IPA (Unsigned for Sideloadly / AltStore)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build_ios_ipa:
+    name: Build iOS .ipa on macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Build Unsigned iOS Release
+        run: |
+          flutter build ios --release --no-codesign
+          mkdir -p Payload
+          cp -r build/ios/iphoneos/Runner.app Payload/
+          zip -r pc_remote_mobile.ipa Payload
+
+      - name: Upload pc_remote_mobile.ipa Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pc_remote_mobile_ios_ipa
+          path: pc_remote_mobile.ipa

@@ -1,0 +1,40 @@
+workflows:
+  ios-sideload-test-workflow:
+    name: iOS Test Paketi (.ipa - Sideloadly / AltStore)
+    max_build_duration: 30
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Bagimliliklari Yukle (flutter pub get)
+        script: |
+          flutter pub get
+      - name: Imzasiz iOS Uygulamasini Derle ve .ipa Paketle
+        script: |
+          flutter build ios --release --no-codesign
+          rm -rf Payload pc_remote_mobile.ipa
+          mkdir -p Payload
+          cp -r build/ios/iphoneos/Runner.app Payload/
+          zip -r -9 pc_remote_mobile.ipa Payload
+    artifacts:
+      - pc_remote_mobile.ipa
+
+  ios-appstore-release-workflow:
+    name: iOS App Store Resmi Yayin (.ipa)
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Bagimliliklari Yukle
+        script: |
+          flutter pub get
+      - name: App Store IPA Derle
+        script: |
+          flutter build ipa --release
+    artifacts:
+      - build/ios/ipa/*.ipa
