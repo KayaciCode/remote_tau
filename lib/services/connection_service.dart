@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -21,6 +22,10 @@ class HostStatus {
   final int screenWidth;
   final int screenHeight;
   final List<MonitorInfo> monitors;
+  final bool authRequired;
+  final bool isAuthenticated;
+  final bool isTunnelActive;
+  final String tunnelUrl;
 
   HostStatus({
     required this.isOnline,
@@ -37,6 +42,10 @@ class HostStatus {
     this.screenWidth = 1920,
     this.screenHeight = 1080,
     this.monitors = const [],
+    this.authRequired = true,
+    this.isAuthenticated = false,
+    this.isTunnelActive = false,
+    this.tunnelUrl = "",
   });
 
   factory HostStatus.fromJson(Map<String, dynamic> json) {
@@ -61,6 +70,10 @@ class HostStatus {
       screenWidth: (json['screen_width'] as num?)?.toInt() ?? 1920,
       screenHeight: (json['screen_height'] as num?)?.toInt() ?? 1080,
       monitors: monList,
+      authRequired: json['auth_required'] ?? true,
+      isAuthenticated: json['is_authenticated'] ?? false,
+      isTunnelActive: json['is_tunnel_active'] ?? false,
+      tunnelUrl: json['tunnel_url'] ?? "",
     );
   }
 }
@@ -97,15 +110,25 @@ class ConnectionService {
   String pin = '793 421';
   String deskId = '849 210 492';
   String wanUrl = '';
+  String autoWanUrl = '';
   bool isWanMode = false;
   bool isConnected = false;
   bool isDemoMode = false;
   int latencyMs = 1;
 
+  // Zero-Trust Security State
+  String authToken = '';
+  String deviceId = '';
+  String deviceName = 'Mobil Cihaz';
+  String masterEmail = 'admin@pcremote.local';
+  bool isAuthenticated = false;
+  bool authRequired = true;
+
   HostStatus? lastStatus;
 
   static final ConnectionService _instance = ConnectionService._internal();
   factory ConnectionService() => _instance;
+
   ConnectionService._internal() {
     if (kIsWeb && Uri.base.host.isNotEmpty) {
       host = Uri.base.host;
@@ -119,19 +142,27 @@ class ConnectionService {
     }
   }
 
+  String get effectiveWanUrl {
+    if (wanUrl.isNotEmpty) return wanUrl;
+    if (autoWanUrl.isNotEmpty) return autoWanUrl;
+    return '';
+  }
+
   String get baseUrl {
     if (kIsWeb && Uri.base.host.isNotEmpty && !isWanMode && host == Uri.base.host) {
       return Uri.base.origin;
     }
-    if (isWanMode && wanUrl.isNotEmpty) {
-      var u = wanUrl.trim();
-      if (!u.startsWith('http://') && !u.startsWith('https://')) {
-        u = 'https://$u';
+    if (isWanMode) {
+      var u = effectiveWanUrl.trim();
+      if (u.isNotEmpty) {
+        if (!u.startsWith('http://') && !u.startsWith('https://')) {
+          u = 'https://$u';
+        }
+        if (u.endsWith('/')) {
+          u = u.substring(0, u.length - 1);
+        }
+        return u;
       }
-      if (u.endsWith('/')) {
-        u = u.substring(0, u.length - 1);
-      }
-      return u;
     }
 
     var h = host.trim();
@@ -146,6 +177,28 @@ class ConnectionService {
     }
     return 'http://$h:$port';
   }
+
+  String _localBaseUrl() {
+    var h = host.trim();
+    if (h.startsWith('http://') || h.startsWith('https://')) {
+      if (h.endsWith('/')) h = h.substring(0, h.length - 1);
+      return h;
+    }
+    return 'http://$h:$port';
+  }
+
+  String _url(String endpointAndQuery) {
+    final sep = endpointAndQuery.contains('?') ? '&' : '?';
+    final tokenParam = authToken.isNotEmpty ? '${sep}token=$authToken' : '';
+    return '$baseUrl$endpointAndQuery$tokenParam';
+  }
+
+  Map<String, String> get authHeaders => authToken.isNotEmpty
+      ? {
+          'Authorization': 'Bearer $authToken',
+          'X-PCRemote-Token': authToken,
+        }
+      : {};
 
   final StreamController<bool> _connectionStreamController =
       StreamController<bool>.broadcast();
@@ -174,6 +227,11 @@ class ConnectionService {
     await prefs.setString('pc_desk_id', deskId);
     await prefs.setBool('pc_is_wan_mode', isWanMode);
     await prefs.setString('pc_wan_url', wanUrl);
+    await prefs.setString('pc_auto_wan_url', autoWanUrl);
+    await prefs.setString('pc_auth_token', authToken);
+    await prefs.setString('pc_device_id', deviceId);
+    await prefs.setString('pc_device_name', deviceName);
+    await prefs.setString('pc_master_email', masterEmail);
   }
 
   Future<void> loadSettings() async {
@@ -189,12 +247,36 @@ class ConnectionService {
     deskId = prefs.getString('pc_desk_id') ?? '849 210 492';
     isWanMode = prefs.getBool('pc_is_wan_mode') ?? false;
     wanUrl = prefs.getString('pc_wan_url') ?? '';
+    autoWanUrl = prefs.getString('pc_auto_wan_url') ?? '';
+    authToken = prefs.getString('pc_auth_token') ?? '';
+    masterEmail = prefs.getString('pc_master_email') ?? 'admin@pcremote.local';
+
+    deviceId = prefs.getString('pc_device_id') ?? '';
+    if (deviceId.isEmpty) {
+      final rand = math.Random().nextInt(999999);
+      deviceId = 'dev_${DateTime.now().millisecondsSinceEpoch.toRadixString(16)}_$rand';
+      await prefs.setString('pc_device_id', deviceId);
+    }
+
+    deviceName = prefs.getString('pc_device_name') ?? '';
+    if (deviceName.isEmpty) {
+      if (kIsWeb) {
+        deviceName = 'Web / Safari İstemci';
+      } else if (defaultTargetPlatform == TargetPlatform.iOS) {
+        deviceName = 'Apple iPhone';
+      } else {
+        deviceName = 'Android Cihaz';
+      }
+      await prefs.setString('pc_device_name', deviceName);
+    }
   }
 
+  /// Intelligently checks connection with seamless Wi-Fi <-> WAN auto fallback.
   Future<bool> checkConnection() async {
     if (isDemoMode || deskId.replaceAll(' ', '') == '000000000') {
       isDemoMode = true;
       isConnected = true;
+      isAuthenticated = true;
       latencyMs = 2;
       lastStatus = HostStatus(
         isOnline: true,
@@ -214,81 +296,224 @@ class ConnectionService {
           MonitorInfo(id: 0, name: "🖥️ Monitör 1 (Ana Ekran - 1920x1080)", width: 1920, height: 1080, isPrimary: true),
           MonitorInfo(id: 1, name: "🖥️ Monitör 2 (Yan Ekran - 1920x1080)", width: 1920, height: 1080, isPrimary: false),
         ],
+        authRequired: false,
+        isAuthenticated: true,
       );
       _connectionStreamController.add(true);
       return true;
     }
 
     final stopwatch = Stopwatch()..start();
+
+    // 1. Try currently configured mode
+    bool success = await _pingEndpoint(baseUrl, stopwatch);
+
+    // 2. Seamless Auto-Fallback:
+    // If we're on Wi-Fi mode and it fails, but we have an autoWanUrl or wanUrl, try WAN automatically!
+    if (!success && !isWanMode && effectiveWanUrl.isNotEmpty) {
+      debugPrint("🔄 Yerel Wi-Fi yanıt vermedi, otomatik Güvenli Bulut (WAN) deneniyor...");
+      stopwatch.reset();
+      stopwatch.start();
+      isWanMode = true;
+      success = await _pingEndpoint(baseUrl, stopwatch);
+      if (!success) {
+        // If WAN also failed, revert mode
+        isWanMode = false;
+      } else {
+        debugPrint("🌐 Otomatik WAN bağlantısı başarıyla kuruldu!");
+      }
+    } else if (success && isWanMode && !kIsWeb) {
+      // If we are currently on WAN mode, silently test if we are back home on Wi-Fi
+      _testLocalReturn();
+    }
+
+    isConnected = success;
+    _connectionStreamController.add(isConnected);
+    return isConnected;
+  }
+
+  Future<bool> _pingEndpoint(String base, Stopwatch sw) async {
     try {
-      final res = await http
-          .get(Uri.parse('$baseUrl/api/status'))
-          .timeout(const Duration(milliseconds: 3000));
-      stopwatch.stop();
-      latencyMs = stopwatch.elapsedMilliseconds;
+      final sep = base.contains('?') ? '&' : '?';
+      final tokenQuery = authToken.isNotEmpty ? '${sep}token=$authToken' : '';
+      final uri = Uri.parse('$base/api/status$tokenQuery');
+
+      final res = await http.get(uri, headers: authHeaders).timeout(const Duration(milliseconds: 2800));
+      sw.stop();
+      latencyMs = sw.elapsedMilliseconds;
+
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
         lastStatus = HostStatus.fromJson(data);
-        isConnected = true;
-        _connectionStreamController.add(true);
+        authRequired = data['auth_required'] ?? true;
+        isAuthenticated = data['is_authenticated'] ?? false;
+
+        // Cache live tunnel URL if reported by host
+        final hostTunnelUrl = (data['tunnel_url'] as String?) ?? '';
+        if (hostTunnelUrl.isNotEmpty && hostTunnelUrl != autoWanUrl) {
+          autoWanUrl = hostTunnelUrl;
+          SharedPreferences.getInstance().then((p) => p.setString('pc_auto_wan_url', autoWanUrl));
+        }
+
         return true;
       }
-    } catch (_) {
-      isConnected = false;
-      _connectionStreamController.add(false);
+    } catch (_) {}
+    return false;
+  }
+
+  void _testLocalReturn() async {
+    try {
+      final localUrl = _localBaseUrl();
+      final uri = Uri.parse('$localUrl/api/status?token=$authToken');
+      final res = await http.get(uri, headers: authHeaders).timeout(const Duration(milliseconds: 1000));
+      if (res.statusCode == 200) {
+        debugPrint("🏠 Eve geri dönüldü, yerel Wi-Fi moduna (1ms) geçiliyor.");
+        isWanMode = false;
+      }
+    } catch (_) {}
+  }
+
+  // --- ZERO-TRUST AUTHENTICATION APIS ---
+
+  /// E-posta & Master Şifre ile Zero-Trust Giriş
+  Future<Map<String, dynamic>> loginWithCredentials(String email, String password) async {
+    if (isDemoMode) {
+      isAuthenticated = true;
+      authToken = 'demo_token';
+      return {'success': true, 'token': authToken};
     }
-    return isConnected;
+    try {
+      final url = _url('/api/auth/login?email=${Uri.encodeComponent(email)}&password=${Uri.encodeComponent(password)}&device_id=$deviceId&device_name=${Uri.encodeComponent(deviceName)}');
+      final res = await http.get(Uri.parse(url), headers: authHeaders).timeout(const Duration(seconds: 5));
+      final data = jsonDecode(res.body);
+      if (res.statusCode == 200 && data['success'] == true) {
+        authToken = data['token'] ?? '';
+        isAuthenticated = true;
+        masterEmail = email;
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('pc_auth_token', authToken);
+        await prefs.setString('pc_master_email', masterEmail);
+        _connectionStreamController.add(true);
+        return {'success': true, 'token': authToken};
+      } else {
+        return {'success': false, 'error': data['error'] ?? 'Hatalı e-posta veya şifre'};
+      }
+    } catch (e) {
+      return {'success': false, 'error': 'Sunucuya bağlanılamadı: $e'};
+    }
+  }
+
+  /// PC Ekranındaki QR / 6 Haneli OTP PIN ile Eşleşme
+  Future<Map<String, dynamic>> pairWithOtp(String otp) async {
+    if (isDemoMode) {
+      isAuthenticated = true;
+      authToken = 'demo_token';
+      return {'success': true, 'token': authToken};
+    }
+    try {
+      final cleanOtp = otp.replaceAll(' ', '');
+      final url = _url('/api/auth/pair_qr?otp=${Uri.encodeComponent(cleanOtp)}&device_id=$deviceId&device_name=${Uri.encodeComponent(deviceName)}');
+      final res = await http.get(Uri.parse(url), headers: authHeaders).timeout(const Duration(seconds: 5));
+      final data = jsonDecode(res.body);
+      if (res.statusCode == 200 && data['success'] == true) {
+        authToken = data['token'] ?? '';
+        isAuthenticated = true;
+        pin = otp;
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('pc_auth_token', authToken);
+        await prefs.setString('pc_pin', pin);
+        _connectionStreamController.add(true);
+        return {'success': true, 'token': authToken};
+      } else {
+        return {'success': false, 'error': data['error'] ?? 'Geçersiz veya süresi dolmuş eşleşme PIN kodu'};
+      }
+    } catch (e) {
+      return {'success': false, 'error': 'Sunucuya bağlanılamadı: $e'};
+    }
+  }
+
+  /// Oturumu kapatıp cihaz yetkisini sıfırlama
+  Future<void> logout() async {
+    authToken = '';
+    isAuthenticated = false;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('pc_auth_token');
+    _connectionStreamController.add(false);
   }
 
   // --- Input APIs ---
 
   void sendMouseMove(double dx, double dy) {
     if (isDemoMode) return;
-    http.get(Uri.parse('$baseUrl/api/mouse/move?dx=${dx.round()}&dy=${dy.round()}'));
+    http.get(
+      Uri.parse(_url('/api/mouse/move?dx=${dx.round()}&dy=${dy.round()}')),
+      headers: authHeaders,
+    );
   }
 
   void sendMouseAbs(int x, int y, {String? click, int monitor = 0}) {
     if (isDemoMode) return;
     final clickParam = click != null ? '&click=$click' : '';
-    http.get(Uri.parse('$baseUrl/api/mouse/abs?x=$x&y=$y&monitor=$monitor$clickParam'));
+    http.get(
+      Uri.parse(_url('/api/mouse/abs?x=$x&y=$y&monitor=$monitor$clickParam')),
+      headers: authHeaders,
+    );
   }
 
   void sendMouseDown(int x, int y, {String btn = 'left', int monitor = 0}) {
     if (isDemoMode) return;
-    http.get(Uri.parse('$baseUrl/api/mouse/down?x=$x&y=$y&btn=$btn&monitor=$monitor'));
+    http.get(
+      Uri.parse(_url('/api/mouse/down?x=$x&y=$y&btn=$btn&monitor=$monitor')),
+      headers: authHeaders,
+    );
   }
 
   void sendMouseUp(int x, int y, {String btn = 'left', int monitor = 0}) {
     if (isDemoMode) return;
-    http.get(Uri.parse('$baseUrl/api/mouse/up?x=$x&y=$y&btn=$btn&monitor=$monitor'));
+    http.get(
+      Uri.parse(_url('/api/mouse/up?x=$x&y=$y&btn=$btn&monitor=$monitor')),
+      headers: authHeaders,
+    );
   }
 
   void sendMouseClick(String btn) {
     if (isDemoMode) return;
-    http.get(Uri.parse('$baseUrl/api/mouse/click?btn=$btn'));
+    http.get(
+      Uri.parse(_url('/api/mouse/click?btn=$btn')),
+      headers: authHeaders,
+    );
   }
 
   void sendMouseScroll(double dy) {
     if (isDemoMode) return;
-    http.get(Uri.parse('$baseUrl/api/mouse/scroll?dy=${dy.round()}'));
+    http.get(
+      Uri.parse(_url('/api/mouse/scroll?dy=${dy.round()}')),
+      headers: authHeaders,
+    );
   }
 
   void sendText(String text) {
     if (isDemoMode) return;
     final encoded = Uri.encodeComponent(text);
-    http.get(Uri.parse('$baseUrl/api/keyboard/type?text=$encoded'));
+    http.get(
+      Uri.parse(_url('/api/keyboard/type?text=$encoded')),
+      headers: authHeaders,
+    );
   }
 
   void sendShortcut(String combo) {
     if (isDemoMode) return;
-    http.get(Uri.parse('$baseUrl/api/keyboard/shortcut?combo=$combo'));
+    http.get(
+      Uri.parse(_url('/api/keyboard/shortcut?combo=$combo')),
+      headers: authHeaders,
+    );
   }
 
   Future<Uint8List?> fetchScreenFrame({int monitor = 0, double scale = 0.65, int quality = 75}) async {
     if (isDemoMode) return null;
     try {
       final res = await http
-          .get(Uri.parse('$baseUrl/api/screen/frame?monitor=$monitor&scale=$scale&q=$quality'))
+          .get(Uri.parse(_url('/api/screen/frame?monitor=$monitor&scale=$scale&q=$quality')), headers: authHeaders)
           .timeout(const Duration(milliseconds: 1500));
       if (res.statusCode == 200 && res.bodyBytes.isNotEmpty) {
         return res.bodyBytes;
@@ -302,31 +527,46 @@ class ConnectionService {
   void sendStreamDeckApp(String app) {
     if (isDemoMode) return;
     final encoded = Uri.encodeComponent(app);
-    http.get(Uri.parse('$baseUrl/api/streamdeck/launch?app=$encoded'));
+    http.get(
+      Uri.parse(_url('/api/streamdeck/launch?app=$encoded')),
+      headers: authHeaders,
+    );
   }
 
   void sendStreamDeckCmd(String cmd) {
     if (isDemoMode) return;
     final encoded = Uri.encodeComponent(cmd);
-    http.get(Uri.parse('$baseUrl/api/streamdeck/command?cmd=$encoded'));
+    http.get(
+      Uri.parse(_url('/api/streamdeck/command?cmd=$encoded')),
+      headers: authHeaders,
+    );
   }
 
   void moveAppToMonitor(String app, {int monitor = 1}) {
     if (isDemoMode) return;
     final encoded = Uri.encodeComponent(app);
-    http.get(Uri.parse('$baseUrl/api/monitors/move_app?app=$encoded&monitor=$monitor'));
+    http.get(
+      Uri.parse(_url('/api/monitors/move_app?app=$encoded&monitor=$monitor')),
+      headers: authHeaders,
+    );
   }
 
   // --- Media & Power APIs ---
 
   void sendMediaAction(String act) {
     if (isDemoMode) return;
-    http.get(Uri.parse('$baseUrl/api/media/action?act=$act'));
+    http.get(
+      Uri.parse(_url('/api/media/action?act=$act')),
+      headers: authHeaders,
+    );
   }
 
   void sendPowerAction(String act) {
     if (isDemoMode) return;
-    http.get(Uri.parse('$baseUrl/api/power/action?act=$act'));
+    http.get(
+      Uri.parse(_url('/api/power/action?act=$act')),
+      headers: authHeaders,
+    );
   }
 
   Future<void> sendWakeOnLan(String mac) async {

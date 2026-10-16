@@ -125,6 +125,16 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
       TextEditingController(text: "40:C2:BA:5B:1B:25");
   final TextEditingController _keyboardInputCtrl = TextEditingController();
 
+  // Zero-Trust Security Controllers & State
+  final TextEditingController _emailCtrl =
+      TextEditingController(text: "admin@pcremote.local");
+  final TextEditingController _passwordCtrl =
+      TextEditingController(text: "123456");
+  final TextEditingController _otpCtrl =
+      TextEditingController(text: "793 421");
+  bool _isAuthLoading = false;
+  int _authModalTab = 0; // 0: PIN / QR, 1: Master Hesap
+
   int _pairingSubTab = 0; // 0: Yerel Wi-Fi, 1: Mobil Veri (WAN)
 
   // Stream Deck Custom Keys & Category
@@ -232,8 +242,14 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
         _ipCtrl.text = _conn.host;
         _portCtrl.text = _conn.port.toString();
         _pinCtrl.text = _conn.pin;
+        _otpCtrl.text = _conn.pin;
         _deskIdCtrl.text = _conn.deskId;
-        _wanUrlCtrl.text = _conn.wanUrl;
+        _emailCtrl.text = _conn.masterEmail;
+        if (_conn.wanUrl.isNotEmpty) {
+          _wanUrlCtrl.text = _conn.wanUrl;
+        } else if (_conn.autoWanUrl.isNotEmpty) {
+          _wanUrlCtrl.text = _conn.autoWanUrl;
+        }
         if (_conn.isWanMode) {
           _pairingSubTab = 1;
         }
@@ -382,8 +398,8 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
     final ok = await _conn.checkConnection();
     if (mounted) {
       setState(() => _isConnected = ok);
-      if (ok && _activeLobbyIndex == 0) {
-        _switchLobby(1); // Go to trackpad when connected
+      if (ok && _conn.isAuthenticated && _activeLobbyIndex == 0) {
+        _switchLobby(1); // Go to trackpad when connected & authorized
       }
     }
   }
@@ -398,33 +414,40 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
       wanMode: false,
     );
     final ok = await _conn.checkConnection();
-    setState(() => _isConnected = ok);
-    if (ok) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: AppTheme.accentGreen,
-          content: Text("✅ PC'ye Yerel Wi-Fi ile Bağlandı! (${_conn.host})"),
-        ),
-      );
-      _switchLobby(1); // switch to Trackpad
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          backgroundColor: AppTheme.accentRed,
-          content: Text("❌ Bağlantı kurulamadı. PC Host açık mı ve aynı Wi-Fi'da mısınız?"),
-        ),
-      );
+    if (mounted) {
+      setState(() => _isConnected = ok);
+      if (ok) {
+        // If not yet authenticated, try pairing with PIN
+        if (!_conn.isAuthenticated && _pinCtrl.text.trim().isNotEmpty) {
+          await _conn.pairWithOtp(_pinCtrl.text.trim());
+          if (mounted) setState(() {});
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppTheme.accentGreen,
+            content: Text("✅ PC'ye Yerel Wi-Fi ile Bağlandı! (${_conn.host})${_conn.isAuthenticated ? ' • Zero-Trust Korumalı 🔒' : ''}"),
+          ),
+        );
+        _switchLobby(1);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            backgroundColor: AppTheme.accentRed,
+            content: Text("❌ Bağlantı kurulamadı. PC Host açık mı ve aynı Wi-Fi'da mısınız?"),
+          ),
+        );
+      }
     }
   }
 
   void _connectViaWan() async {
     HapticFeedback.mediumImpact();
-    final wanUrl = _wanUrlCtrl.text.trim();
+    final wanUrl = _wanUrlCtrl.text.trim().isNotEmpty ? _wanUrlCtrl.text.trim() : _conn.autoWanUrl;
     if (wanUrl.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           backgroundColor: AppTheme.accentAmber,
-          content: Text("⚠️ Lütfen PC'deki Uzak Bağlantı Linkini girin veya QR kodu okutun."),
+          content: Text("⚠️ PC'deki Bulut Tüneli linki henüz hazır değil veya girilmedi."),
         ),
       );
       return;
@@ -439,23 +462,321 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
       newWanUrl: wanUrl,
     );
     final ok = await _conn.checkConnection();
-    setState(() => _isConnected = ok);
-    if (ok) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: AppTheme.accentGreen,
-          content: Text("🌐 Mobil Veri ile PC'ye Bağlanıldı!"),
-        ),
-      );
-      _switchLobby(1);
-    } else {
+    if (mounted) {
+      setState(() => _isConnected = ok);
+      if (ok) {
+        if (!_conn.isAuthenticated && _pinCtrl.text.trim().isNotEmpty) {
+          await _conn.pairWithOtp(_pinCtrl.text.trim());
+          if (mounted) setState(() {});
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppTheme.accentGreen,
+            content: Text("🌐 Mobil Veri ile PC'ye Bağlanıldı!${_conn.isAuthenticated ? ' • Zero-Trust Korumalı 🔒' : ''}"),
+          ),
+        );
+        _switchLobby(1);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            backgroundColor: AppTheme.accentRed,
+            content: Text("❌ Uzak bağlantı kurulamadı. PC'de 'Mobil Veri Tüneli' açık mı?"),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _submitPinAuth([String? customOtp]) async {
+    final otp = (customOtp ?? _otpCtrl.text).trim();
+    if (otp.isEmpty) return;
+    setState(() => _isAuthLoading = true);
+    HapticFeedback.mediumImpact();
+    final res = await _conn.pairWithOtp(otp);
+    if (mounted) {
+      setState(() => _isAuthLoading = false);
+      if (res['success'] == true) {
+        HapticFeedback.heavyImpact();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            backgroundColor: AppTheme.accentGreen,
+            content: Text("🔒 Cihaz Başarıyla Eşleşti & Yetkilendirildi!"),
+          ),
+        );
+        _switchLobby(1);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppTheme.accentRed,
+            content: Text("❌ ${res['error'] ?? 'Eşleşme başarısız'}"),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _submitMasterAuth() async {
+    final email = _emailCtrl.text.trim();
+    final pass = _passwordCtrl.text.trim();
+    if (email.isEmpty || pass.isEmpty) return;
+    setState(() => _isAuthLoading = true);
+    HapticFeedback.mediumImpact();
+    final res = await _conn.loginWithCredentials(email, pass);
+    if (mounted) {
+      setState(() => _isAuthLoading = false);
+      if (res['success'] == true) {
+        HapticFeedback.heavyImpact();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            backgroundColor: AppTheme.accentGreen,
+            content: Text("🔑 Yönetici Girişi Başarılı! Cihaz Eşleşti."),
+          ),
+        );
+        _switchLobby(1);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppTheme.accentRed,
+            content: Text("❌ ${res['error'] ?? 'Giriş başarısız'}"),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _logoutDevice() async {
+    await _conn.logout();
+    if (mounted) {
+      setState(() {});
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          backgroundColor: AppTheme.accentRed,
-          content: Text("❌ Uzak bağlantı kurulamadı. PC'de 'Mobil Veri Tüneli' açık mı?"),
+          backgroundColor: AppTheme.accentAmber,
+          content: Text("🔓 Oturum kapatıldı, cihaz yetkisi kaldırıldı."),
         ),
       );
     }
+  }
+
+  void _showAuthModal() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF0F172A),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 20,
+                right: 20,
+                top: 20,
+                bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.shield_outlined, color: AppTheme.accentCyan, size: 22),
+                          SizedBox(width: 8),
+                          Text(
+                            "Zero-Trust Cihaz Eşleşmesi",
+                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                          ),
+                        ],
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white70),
+                        onPressed: () => Navigator.pop(ctx),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    "PC'nizi yetkisiz erişimlere karşı korumak için cihazınızı eşleştirin.",
+                    style: TextStyle(fontSize: 11, color: AppTheme.darkTextMuted),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Auth Method Selector Tabs
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1E293B),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: InkWell(
+                            onTap: () => setModalState(() => _authModalTab = 0),
+                            borderRadius: BorderRadius.circular(8),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              decoration: BoxDecoration(
+                                color: _authModalTab == 0 ? AppTheme.accentCyan : Colors.transparent,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.pin, size: 14, color: _authModalTab == 0 ? Colors.black : Colors.white70),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    "PIN ile Eşle",
+                                    style: TextStyle(
+                                      fontSize: 11.5,
+                                      fontWeight: FontWeight.bold,
+                                      color: _authModalTab == 0 ? Colors.black : Colors.white70,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          child: InkWell(
+                            onTap: () => setModalState(() => _authModalTab = 1),
+                            borderRadius: BorderRadius.circular(8),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              decoration: BoxDecoration(
+                                color: _authModalTab == 1 ? const Color(0xFF8B5CF6) : Colors.transparent,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.person, size: 14, color: _authModalTab == 1 ? Colors.white : Colors.white70),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    "Yönetici Girişi",
+                                    style: TextStyle(
+                                      fontSize: 11.5,
+                                      fontWeight: FontWeight.bold,
+                                      color: _authModalTab == 1 ? Colors.white : Colors.white70,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // TAB 0: PIN / OTP AUTH
+                  if (_authModalTab == 0) ...[
+                    TextField(
+                      controller: _otpCtrl,
+                      style: const TextStyle(fontSize: 15, color: Colors.white, letterSpacing: 3, fontWeight: FontWeight.bold),
+                      textAlign: TextAlign.center,
+                      keyboardType: TextInputType.number,
+                      decoration: InputDecoration(
+                        labelText: "PC Ekranındaki 6 Haneli PIN Kodu",
+                        labelStyle: const TextStyle(color: AppTheme.accentCyan, fontSize: 11),
+                        hintText: "793 421",
+                        hintStyle: const TextStyle(color: Colors.white24),
+                        filled: true,
+                        fillColor: const Color(0xFF1E293B),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 44,
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppTheme.accentCyan,
+                          foregroundColor: Colors.black,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        ),
+                        icon: _isAuthLoading
+                            ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                            : const Icon(Icons.check_circle_outline, size: 18),
+                        label: Text(_isAuthLoading ? "Yetkilendiriliyor..." : "Bu Cihazı Eşle & Yetkilendir", style: const TextStyle(fontWeight: FontWeight.bold)),
+                        onPressed: _isAuthLoading
+                            ? null
+                            : () async {
+                                Navigator.pop(ctx);
+                                await _submitPinAuth();
+                              },
+                      ),
+                    ),
+                  ],
+
+                  // TAB 1: MASTER CREDENTIALS AUTH
+                  if (_authModalTab == 1) ...[
+                    TextField(
+                      controller: _emailCtrl,
+                      style: const TextStyle(fontSize: 13, color: Colors.white),
+                      keyboardType: TextInputType.emailAddress,
+                      decoration: InputDecoration(
+                        labelText: "Yönetici E-posta",
+                        labelStyle: const TextStyle(color: Color(0xFFC084FC), fontSize: 11),
+                        hintText: "admin@pcremote.local",
+                        hintStyle: const TextStyle(color: Colors.white24),
+                        filled: true,
+                        fillColor: const Color(0xFF1E293B),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _passwordCtrl,
+                      obscureText: true,
+                      style: const TextStyle(fontSize: 13, color: Colors.white),
+                      decoration: InputDecoration(
+                        labelText: "Master Parola",
+                        labelStyle: const TextStyle(color: Color(0xFFC084FC), fontSize: 11),
+                        hintText: "••••••",
+                        hintStyle: const TextStyle(color: Colors.white24),
+                        filled: true,
+                        fillColor: const Color(0xFF1E293B),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 44,
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF8B5CF6),
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        ),
+                        icon: _isAuthLoading
+                            ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                            : const Icon(Icons.vpn_key, size: 18),
+                        label: Text(_isAuthLoading ? "Doğrulanıyor..." : "Giriş Yap ve Yetki Al", style: const TextStyle(fontWeight: FontWeight.bold)),
+                        onPressed: _isAuthLoading
+                            ? null
+                            : () async {
+                                Navigator.pop(ctx);
+                                await _submitMasterAuth();
+                              },
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   @override
@@ -546,13 +867,15 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
                   Text(
                     _isConnected
                         ? (_conn.isWanMode
-                            ? "🌐 Mobil Veri (WAN) Aktif"
-                            : "📶 Wi-Fi: ${_conn.host}")
+                            ? "🌐 Mobil Veri (WAN) • ${_conn.isAuthenticated ? 'Yetkili 🔒' : 'Eşleşme Gerekli ⚠️'}"
+                            : "📶 Wi-Fi: ${_conn.host} • ${_conn.isAuthenticated ? 'Yetkili 🔒' : 'Eşleşme Gerekli ⚠️'}")
                         : "Bağlantı Bekleniyor",
                     style: TextStyle(
                       fontSize: 9.5,
                       color: _isConnected
-                          ? (_conn.isWanMode ? const Color(0xFFC084FC) : AppTheme.accentGreen)
+                          ? (_conn.isAuthenticated
+                              ? (_conn.isWanMode ? const Color(0xFFC084FC) : AppTheme.accentGreen)
+                              : Colors.amberAccent)
                           : AppTheme.darkTextMuted,
                     ),
                   ),
@@ -562,6 +885,45 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
           ),
           Row(
             children: [
+              // Zero-Trust Auth Badge
+              if (_isConnected)
+                InkWell(
+                  onTap: _showAuthModal,
+                  borderRadius: BorderRadius.circular(6),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    margin: const EdgeInsets.only(right: 6),
+                    decoration: BoxDecoration(
+                      color: _conn.isAuthenticated
+                          ? Colors.green.withOpacity(0.18)
+                          : Colors.amber.withOpacity(0.18),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(
+                        color: _conn.isAuthenticated
+                            ? Colors.green.withOpacity(0.4)
+                            : Colors.amber.withOpacity(0.5),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          _conn.isAuthenticated ? Icons.shield : Icons.lock_open,
+                          size: 10,
+                          color: _conn.isAuthenticated ? Colors.greenAccent : Colors.amberAccent,
+                        ),
+                        const SizedBox(width: 3),
+                        Text(
+                          _conn.isAuthenticated ? "Zero-Trust" : "Giriş Yap",
+                          style: TextStyle(
+                            fontSize: 9.5,
+                            fontWeight: FontWeight.bold,
+                            color: _conn.isAuthenticated ? Colors.greenAccent : Colors.amberAccent,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               // Latency / WAN Pill
               if (_isConnected)
                 Container(
@@ -696,6 +1058,148 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // ZERO-TRUST SECURITY CARD
+          Container(
+            padding: const EdgeInsets.all(14),
+            margin: const EdgeInsets.only(bottom: 12),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: _conn.isAuthenticated
+                    ? [const Color(0xFF065F46).withOpacity(0.35), const Color(0xFF0F172A)]
+                    : [const Color(0xFF78350F).withOpacity(0.35), const Color(0xFF0F172A)],
+              ),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: _conn.isAuthenticated
+                    ? Colors.greenAccent.withOpacity(0.4)
+                    : Colors.amberAccent.withOpacity(0.4),
+              ),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: _conn.isAuthenticated
+                        ? Colors.greenAccent.withOpacity(0.15)
+                        : Colors.amberAccent.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(
+                    _conn.isAuthenticated ? Icons.verified_user : Icons.gpp_maybe,
+                    color: _conn.isAuthenticated ? Colors.greenAccent : Colors.amberAccent,
+                    size: 24,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(
+                            _conn.isAuthenticated ? "Zero-Trust: Cihaz Yetkili" : "Güvenlik: Eşleşme Gerekli",
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+                          ),
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                            decoration: BoxDecoration(
+                              color: (_conn.isAuthenticated ? Colors.green : Colors.amber).withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              _conn.isAuthenticated ? "KORUMALI" : "KİLİTLİ",
+                              style: TextStyle(
+                                fontSize: 8.5,
+                                fontWeight: FontWeight.bold,
+                                color: _conn.isAuthenticated ? Colors.greenAccent : Colors.amberAccent,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        _conn.isAuthenticated
+                            ? "Cihaz ID: ${_conn.deviceId.length > 16 ? _conn.deviceId.substring(0, 16) + '...' : _conn.deviceId}"
+                            : "PC kontrolü için PIN veya Yönetici şifresi girin.",
+                        style: const TextStyle(fontSize: 10, color: AppTheme.darkTextMuted),
+                      ),
+                    ],
+                  ),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _conn.isAuthenticated ? const Color(0xFF1E293B) : AppTheme.accentCyan,
+                    foregroundColor: _conn.isAuthenticated ? Colors.white70 : Colors.black,
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  onPressed: _conn.isAuthenticated ? _logoutDevice : _showAuthModal,
+                  child: Text(
+                    _conn.isAuthenticated ? "Çıkış Yap" : "Giriş Yap",
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // ZERO-TOUCH AUTO-WAN CARD (Markette / Dışarıda)
+          Container(
+            padding: const EdgeInsets.all(12),
+            margin: const EdgeInsets.only(bottom: 12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0F172A),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFF8B5CF6).withOpacity(0.3)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.cloud_sync, color: Color(0xFFC084FC), size: 22),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        "Zero-Touch Dış Erişim (Market / 4G)",
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11.5, color: Colors.white),
+                      ),
+                      const SizedBox(height: 1),
+                      Text(
+                        _conn.isWanMode
+                            ? "Bulut Tüneli üzerinden bağlısınız 🌐"
+                            : (_conn.autoWanUrl.isNotEmpty
+                                ? "Ev dışına çıktığınızda tünel otomatik bağlanır."
+                                : "PC tüneli arka planda otomatik hazırlanıyor..."),
+                        style: const TextStyle(fontSize: 9.5, color: Color(0xFF94A3B8)),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: (_conn.isWanMode || _conn.autoWanUrl.isNotEmpty ? Colors.green : Colors.amber).withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    _conn.isWanMode ? "WAN Canlı" : (_conn.autoWanUrl.isNotEmpty ? "Hazır" : "Bekleniyor"),
+                    style: TextStyle(
+                      fontSize: 9,
+                      fontWeight: FontWeight.bold,
+                      color: _conn.isWanMode || _conn.autoWanUrl.isNotEmpty ? Colors.greenAccent : Colors.amberAccent,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
           // Connection Mode Selector Tabs
           Container(
             padding: const EdgeInsets.all(4),
