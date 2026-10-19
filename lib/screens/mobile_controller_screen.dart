@@ -308,6 +308,7 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
 
   void _switchLobby(int idx) {
     HapticFeedback.lightImpact();
+    final prevLobby = _activeLobbyIndex;
     final monCount = _conn.lastStatus?.monitors.length ?? 1;
     setState(() {
       _activeLobbyIndex = idx;
@@ -328,7 +329,9 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
         }
       }
     });
-    if (idx == 3 && monCount < 3 && _isConnected) {
+    if (prevLobby == 3 && idx != 3 && _isConnected) {
+      _conn.disableVirtualMonitor();
+    } else if (idx == 3 && monCount < 3 && _isConnected) {
       _ensureThirdMonitorActive();
     }
     if (idx == 2 || idx == 3) {
@@ -377,6 +380,9 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
 
   @override
   void dispose() {
+    if (_activeLobbyIndex == 3 && _isConnected) {
+      _conn.disableVirtualMonitor();
+    }
     _statusPollTimer?.cancel();
     _stopScreenStream();
     _discovery.stopDiscovery();
