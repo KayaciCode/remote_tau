@@ -268,17 +268,69 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
     });
   }
 
+  bool _isEnablingVirtualMonitor = false;
+
+  Future<void> _ensureThirdMonitorActive() async {
+    if (_isEnablingVirtualMonitor) return;
+    setState(() {
+      _isEnablingVirtualMonitor = true;
+    });
+    final ok = await _conn.enableVirtualMonitor();
+    if (mounted) {
+      final newCount = _conn.lastStatus?.monitors.length ?? 1;
+      setState(() {
+        _isEnablingVirtualMonitor = false;
+        if (ok || newCount >= 3) {
+          _selectedMonitor = 2;
+        } else if (newCount >= 2) {
+          _selectedMonitor = newCount - 1;
+        }
+        _screenFrameBytes = null;
+      });
+      _startScreenStream();
+    }
+  }
+
+  Future<void> _disableThirdMonitor() async {
+    if (_isEnablingVirtualMonitor) return;
+    setState(() {
+      _isEnablingVirtualMonitor = true;
+    });
+    await _conn.disableVirtualMonitor();
+    if (mounted) {
+      setState(() {
+        _isEnablingVirtualMonitor = false;
+        _selectedMonitor = 0;
+        _screenFrameBytes = null;
+      });
+    }
+  }
+
   void _switchLobby(int idx) {
     HapticFeedback.lightImpact();
     final monCount = _conn.lastStatus?.monitors.length ?? 1;
     setState(() {
       _activeLobbyIndex = idx;
-      if (idx == 3 && monCount >= 2) {
-        _selectedMonitor = 1;
-      } else if (_selectedMonitor >= monCount) {
-        _selectedMonitor = 0;
+      _screenFrameBytes = null;
+      if (idx == 2) {
+        // Sayfa A (Monitör Yansıtma): Fiziksel monitörleri (Monitör 1 veya 2) yansıtır
+        if (_selectedMonitor >= 2 || _selectedMonitor >= monCount) {
+          _selectedMonitor = 0;
+        }
+      } else if (idx == 3) {
+        // Sayfa B (Yeni 3. Monitör): Bağımsız 3. sanal monitörü seçer
+        if (monCount >= 3) {
+          _selectedMonitor = 2;
+        } else if (monCount >= 2) {
+          _selectedMonitor = monCount - 1;
+        } else {
+          _selectedMonitor = 0;
+        }
       }
     });
+    if (idx == 3 && monCount < 3 && _isConnected) {
+      _ensureThirdMonitorActive();
+    }
     if (idx == 2 || idx == 3) {
       _startScreenStream();
     } else {
@@ -1984,12 +2036,16 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
   }
 
   // ==========================================
-  // LOBİ 3: CANLI EKRAN & DOĞRUDAN EKRAN ÜZERİNDEN MOUSE (MULTI-MONITOR)
+  // SAYFA A (LOBİ 2): MONİTÖR YANSITMA (FİZİKSEL 1. VE 2. MONİTÖR)
   // ==========================================
   Widget _buildLobby3ScreenMirror() {
+    final allMonitors = _conn.lastStatus?.monitors ?? [];
+    // Physical monitors for Mirroring page (Monitor 1 & Monitor 2)
+    final mirrorMonitors = allMonitors.length >= 2 ? allMonitors.take(2).toList() : allMonitors;
+
     return Column(
       children: [
-        // Multi-Monitor Selector Bar
+        // Page A Identity & Physical Monitor Selector Bar
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
           decoration: const BoxDecoration(
@@ -2002,24 +2058,23 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
               Expanded(
                 child: Builder(
                   builder: (context) {
-                    final monitors = _conn.lastStatus?.monitors ?? [];
-                    if (monitors.isEmpty) {
+                    if (mirrorMonitors.isEmpty) {
                       return Row(
                         children: [
-                          _buildMonitorTab(0, "🖥️ Monitör 1 (Ana Ekran)"),
+                          _buildMonitorTab(0, "🖥️ 1. Monitör (Ana Ekran)"),
                           const SizedBox(width: 8),
-                          _buildMonitorTab(1, "🖥️ Monitör 2 (Yan Ekran)"),
+                          _buildMonitorTab(1, "🖥️ 2. Monitör (Fiziksel)"),
                         ],
                       );
                     }
                     return SingleChildScrollView(
                       scrollDirection: Axis.horizontal,
                       child: Row(
-                        children: List.generate(monitors.length, (i) {
-                          final m = monitors[i];
-                          final title = m.isPrimary
-                              ? "🖥️ Monitör ${i + 1} (Ana • ${m.width}x${m.height})"
-                              : "🖥️ Monitör ${i + 1} (Yan • ${m.width}x${m.height})";
+                        children: List.generate(mirrorMonitors.length, (i) {
+                          final m = mirrorMonitors[i];
+                          final title = i == 0
+                              ? "🖥️ 1. Monitör (Ana • ${m.width}x${m.height})"
+                              : "🖥️ 2. Monitör (Fiziksel • ${m.width}x${m.height})";
                           return Padding(
                             padding: const EdgeInsets.only(right: 8),
                             child: _buildMonitorTab(i, title),
@@ -2064,11 +2119,49 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
           ),
         ),
 
+        // Mode Info Strip + Quick Jump to Independent 3rd Monitor
+        Container(
+          margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0E172A),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: AppTheme.accentCyan.withOpacity(0.25)),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.cast_connected, size: 15, color: AppTheme.accentCyan),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  "Monitör Yansıtma Modu: Şu an ${_selectedMonitor + 1}. fiziksel monitörünüzü yansıtıyorsunuz.",
+                  style: const TextStyle(fontSize: 10, color: Colors.white70),
+                ),
+              ),
+              InkWell(
+                onTap: () => _switchLobby(3),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF8B5CF6).withOpacity(0.25),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: const Color(0xFF8B5CF6)),
+                  ),
+                  child: const Text(
+                    "➕ Yeni 3. Monitöre Geç",
+                    style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.bold, color: Color(0xFFC084FC)),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+
         // Fullscreen Launch Glowing Banner
         Container(
-          margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
           width: double.infinity,
-          height: 44,
+          height: 42,
           child: ElevatedButton.icon(
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF00F2FE),
@@ -2078,43 +2171,13 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
               shadowColor: const Color(0xFF00F2FE).withOpacity(0.5),
             ),
             icon: const Icon(Icons.fullscreen, size: 20, color: Colors.black),
-            label: const Text(
-              "⛶ TAM EKRAN DOKUNMATİK MONİTÖRÜ BAŞLAT",
-              style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11.5, letterSpacing: 0.5),
+            label: Text(
+              "⛶ ${_selectedMonitor + 1}. MONİTÖRÜ TAM EKRAN YANSIT",
+              style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 11.5, letterSpacing: 0.5),
             ),
             onPressed: () => _toggleFullScreenMonitor(true),
           ),
         ),
-
-        // Quick Window Mover Strip when Monitor 2 (Yan Ekran) is selected
-        if (_selectedMonitor > 0)
-          Container(
-            margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-            decoration: BoxDecoration(
-              color: const Color(0xFF14102A),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: const Color(0xFF8B5CF6).withOpacity(0.45)),
-            ),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  const Text(
-                    "📲 Yan Ekrana Taşı: ",
-                    style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Color(0xFFC084FC)),
-                  ),
-                  _buildQuickMoveChip("YouTube / Chrome", "chrome"),
-                  const SizedBox(width: 5),
-                  _buildQuickMoveChip("Spotify", "spotify"),
-                  const SizedBox(width: 5),
-                  _buildQuickMoveChip("Discord", "discord"),
-                  const SizedBox(width: 5),
-                  _buildQuickMoveChip("Aktif Pencere", "active"),
-                ],
-              ),
-            ),
-          ),
 
         // Live Mirrored Desktop Canvas with Direct Touch-to-Click
         Expanded(
@@ -2218,7 +2281,7 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
                                   const SizedBox(height: 14),
                                   Text(
                                     _isConnected
-                                        ? "🖥️ Windows Masaüstü Yayınlanıyor..."
+                                        ? "🖥️ ${_selectedMonitor + 1}. Fiziksel Monitör Yansıtılıyor..."
                                         : "⚠️ PC Bağlantısı Yok (Lobi 1'den bağlanın)",
                                     style: const TextStyle(
                                       fontSize: 12,
@@ -2264,7 +2327,9 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
                                   ),
                                   const SizedBox(width: 6),
                                   Text(
-                                    _screenFrameBytes != null ? "Canlı Yayın & Dokunmatik Aktif" : "Yükleniyor...",
+                                    _screenFrameBytes != null
+                                        ? "Yansıtma: ${_selectedMonitor + 1}. Monitör Canlı"
+                                        : "Yükleniyor...",
                                     style: const TextStyle(fontSize: 9.5, color: Colors.white, fontWeight: FontWeight.bold),
                                   ),
                                 ],
@@ -2286,7 +2351,7 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
                                   border: Border.all(color: AppTheme.accentCyan.withOpacity(0.3)),
                                 ),
                                 child: const Text(
-                                  "👆 Dokun: Sol Tık • Uzun Bas: Sağ Tık • Çift Dokun: Çift Tık",
+                                  "👆 Dokun: Sol Tık • Uzun Bas: Sağ Tık • Sürükle: Fare Taşı",
                                   style: TextStyle(fontSize: 9.5, color: AppTheme.accentCyan, fontWeight: FontWeight.w500),
                                 ),
                               ),
@@ -2302,7 +2367,7 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
           ),
         ),
 
-        // Quick Mouse Control Bar in Lobby 3
+        // Quick Mouse Control Bar in Lobby 2
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           margin: const EdgeInsets.only(left: 8, right: 8, bottom: 6),
@@ -2424,41 +2489,43 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
     );
   }
 
-  Widget _buildQuickMoveChip(String label, String appKey) {
+  Widget _buildQuickMoveChip(String label, String appKey, {int targetMonitor = 2}) {
     return InkWell(
       onTap: () {
         HapticFeedback.mediumImpact();
-        _conn.moveAppToMonitor(appKey, monitor: _selectedMonitor > 0 ? _selectedMonitor : 1);
+        _conn.moveAppToMonitor(appKey, monitor: targetMonitor);
       },
       borderRadius: BorderRadius.circular(6),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         decoration: BoxDecoration(
-          color: const Color(0xFF8B5CF6).withOpacity(0.22),
+          color: const Color(0xFF8B5CF6).withOpacity(0.25),
           borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: const Color(0xFF8B5CF6).withOpacity(0.5)),
+          border: Border.all(color: const Color(0xFF8B5CF6).withOpacity(0.6)),
         ),
         child: Text(
           label,
-          style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.bold, color: Colors.white),
+          style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white),
         ),
       ),
     );
   }
 
   // ==========================================
-  // LOBİ 3: 🖥️ 2. EKRAN & SİBER YAN PANEL (EXTENDED DISPLAY & SIDECAR COCKPIT)
+  // SAYFA B (LOBİ 3): 📱 YENİ BAĞIMSIZ 3. MONİTÖR (EXTENDED 3RD DISPLAY) & YAN PANEL
   // ==========================================
   Widget _buildLobby3SidecarAndSecondMonitor() {
-    final monCount = _conn.lastStatus?.monitors.length ?? 1;
-    final hasSecondMonitor = monCount >= 2;
+    final monitors = _conn.lastStatus?.monitors ?? [];
+    final monCount = monitors.length;
+    final hasThirdMonitor = monCount >= 3;
+    final thirdMonIdx = hasThirdMonitor ? 2 : (monCount > 0 ? monCount - 1 : 0);
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Sub-Tab Switcher: 2. Monitör Modu vs Siber Yan Panel
+          // Sub-Tab Switcher: Bağımsız 3. Monitör vs Siber Yan Panel
           Container(
             padding: const EdgeInsets.all(4),
             decoration: BoxDecoration(
@@ -2474,7 +2541,7 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
                       HapticFeedback.selectionClick();
                       setState(() {
                         _sidecarSubTab = 0;
-                        _selectedMonitor = 1;
+                        _selectedMonitor = thirdMonIdx;
                       });
                       _startScreenStream();
                     },
@@ -2491,10 +2558,10 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(Icons.tv, size: 15, color: _sidecarSubTab == 0 ? Colors.white : Colors.white70),
+                          Icon(Icons.add_to_queue, size: 15, color: _sidecarSubTab == 0 ? Colors.white : Colors.white70),
                           const SizedBox(width: 6),
                           Text(
-                            "🖥️ Genişletilmiş 2. Monitör",
+                            "📱 Yeni 3. Monitör (Bağımsız)",
                             style: TextStyle(
                               fontSize: 11.5,
                               fontWeight: FontWeight.bold,
@@ -2542,22 +2609,31 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
               ],
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
 
-          // SUB-TAB 0: GENİŞLETİLMİŞ 2. MONİTÖR
+          // SUB-TAB 0: YENİ BAĞIMSIZ 3. MONİTÖR (TELEFON EKRANI)
           if (_sidecarSubTab == 0) ...[
-            // Status & Mode Info Banner
+            // 3rd Monitor Status & Activation Card
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
                 gradient: LinearGradient(
-                  colors: [
-                    const Color(0xFF8B5CF6).withOpacity(0.18),
-                    const Color(0xFF3B82F6).withOpacity(0.15),
-                  ],
+                  colors: hasThirdMonitor
+                      ? [
+                          const Color(0xFF059669).withOpacity(0.22),
+                          const Color(0xFF8B5CF6).withOpacity(0.18),
+                        ]
+                      : [
+                          const Color(0xFF8B5CF6).withOpacity(0.22),
+                          const Color(0xFF1E293B),
+                        ],
                 ),
                 borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: const Color(0xFF8B5CF6).withOpacity(0.4)),
+                border: Border.all(
+                  color: hasThirdMonitor
+                      ? AppTheme.accentGreen.withOpacity(0.5)
+                      : const Color(0xFF8B5CF6).withOpacity(0.5),
+                ),
               ),
               child: Row(
                 children: [
@@ -2565,26 +2641,66 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
                     width: 42,
                     height: 42,
                     decoration: BoxDecoration(
-                      color: const Color(0xFF8B5CF6).withOpacity(0.25),
+                      color: (hasThirdMonitor ? AppTheme.accentGreen : const Color(0xFF8B5CF6)).withOpacity(0.2),
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: const Icon(Icons.picture_in_picture, color: Color(0xFFC084FC), size: 24),
+                    child: Icon(
+                      hasThirdMonitor ? Icons.phonelink : Icons.add_to_queue,
+                      color: hasThirdMonitor ? AppTheme.accentGreen : const Color(0xFFC084FC),
+                      size: 22,
+                    ),
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          hasSecondMonitor ? "✅ 2. Ekran Alanı Algılandı (Oyun Korumalı)" : "💡 Bağımsız 2. Monitör Alanı",
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                hasThirdMonitor
+                                    ? "🟢 3. Bağımsız Monitör Aktif [Ekran 3]"
+                                    : (_isEnablingVirtualMonitor
+                                        ? "⏳ 3. Sanal Monitör Oluşturuluyor..."
+                                        : "⚪ 3. Sanal Monitör Kapalı"),
+                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12.5, color: Colors.white),
+                              ),
+                            ),
+                          ],
                         ),
-                        const SizedBox(height: 2),
-                        const Text(
-                          "Ana ekrandaki oyununuz kapanmadan bu ekrana pencere taşıyıp dokunmatik kontrol edebilirsiniz.",
-                          style: TextStyle(fontSize: 10, color: AppTheme.darkTextMuted),
+                        const SizedBox(height: 3),
+                        Text(
+                          hasThirdMonitor
+                              ? "1. Monitörde kodlama, 2. Monitörde render yaparken bu ekranda bağımsız müzik/uygulama açabilirsiniz."
+                              : "Tek dokunuşla Windows'a 3. bağımsız ekranı ekleyin.",
+                          style: const TextStyle(fontSize: 10, color: AppTheme.darkTextMuted),
                         ),
                       ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: hasThirdMonitor ? const Color(0xFF1E293B) : AppTheme.accentGreen,
+                      foregroundColor: hasThirdMonitor ? Colors.redAccent : Colors.black,
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                    onPressed: _isEnablingVirtualMonitor
+                        ? null
+                        : () {
+                            if (hasThirdMonitor) {
+                              _disableThirdMonitor();
+                            } else {
+                              _ensureThirdMonitorActive();
+                            }
+                          },
+                    child: Text(
+                      _isEnablingVirtualMonitor
+                          ? "..."
+                          : (hasThirdMonitor ? "3. Ekranı Kapat" : "➕ 3. Ekranı Aç"),
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 10.5),
                     ),
                   ),
                 ],
@@ -2592,39 +2708,55 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
             ),
             const SizedBox(height: 8),
 
-            // One-Tap Window Mover to 2nd Monitor
+            // One-Tap App Launcher & Window Mover directly to 3rd Monitor
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               decoration: BoxDecoration(
                 color: const Color(0xFF14102A),
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: const Color(0xFF8B5CF6).withOpacity(0.4)),
+                border: Border.all(color: const Color(0xFF8B5CF6).withOpacity(0.45)),
               ),
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    const Text(
-                      "📲 2. Ekrana Taşı: ",
-                      style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.bold, color: Color(0xFFC084FC)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Row(
+                    children: [
+                      Icon(Icons.rocket_launch, size: 13, color: Color(0xFFC084FC)),
+                      SizedBox(width: 5),
+                      Text(
+                        "3. Monitörde (Telefonunda) Şarkı / Uygulama Aç veya Buraya Çek:",
+                        style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.bold, color: Color(0xFFC084FC)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        _buildQuickMoveChip("🎵 Spotify", "spotify", targetMonitor: thirdMonIdx),
+                        const SizedBox(width: 6),
+                        _buildQuickMoveChip("🎶 YouTube Müzik", "ytmusic", targetMonitor: thirdMonIdx),
+                        const SizedBox(width: 6),
+                        _buildQuickMoveChip("▶️ YouTube", "youtube", targetMonitor: thirdMonIdx),
+                        const SizedBox(width: 6),
+                        _buildQuickMoveChip("💬 Discord", "discord", targetMonitor: thirdMonIdx),
+                        const SizedBox(width: 6),
+                        _buildQuickMoveChip("🌐 Tarayıcı", "chrome", targetMonitor: thirdMonIdx),
+                        const SizedBox(width: 6),
+                        _buildQuickMoveChip("🪟 Aktif Pencereyi Çek", "active", targetMonitor: thirdMonIdx),
+                      ],
                     ),
-                    _buildQuickMoveChip("YouTube / Chrome", "chrome"),
-                    const SizedBox(width: 6),
-                    _buildQuickMoveChip("Spotify", "spotify"),
-                    const SizedBox(width: 6),
-                    _buildQuickMoveChip("Discord", "discord"),
-                    const SizedBox(width: 6),
-                    _buildQuickMoveChip("Aktif Pencere", "active"),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
             const SizedBox(height: 10),
 
-            // Big Glowing Full-Screen Button
+            // Big Glowing Full-Screen 3rd Monitor Button
             SizedBox(
               width: double.infinity,
-              height: 48,
+              height: 46,
               child: ElevatedButton.icon(
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF8B5CF6),
@@ -2635,33 +2767,33 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
                 ),
                 icon: const Icon(Icons.fullscreen, size: 22),
                 label: const Text(
-                  "⛶ TAM EKRAN 2. MONİTÖRÜ BAŞLAT",
-                  style: TextStyle(fontWeight: FontWeight.w900, fontSize: 12.5, letterSpacing: 0.5),
+                  "⛶ TAM EKRAN 3. MONİTÖRÜ (YATAY MOD) BAŞLAT",
+                  style: TextStyle(fontWeight: FontWeight.w900, fontSize: 12, letterSpacing: 0.4),
                 ),
                 onPressed: () {
                   setState(() {
-                    _selectedMonitor = 1;
+                    _selectedMonitor = thirdMonIdx;
                   });
                   _toggleFullScreenMonitor(true);
                 },
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
 
-            // Live 2nd Monitor Preview Canvas with Touch-to-Click
+            // Live 3rd Monitor Interactive Canvas with Direct Touch, Drag, and Right-Click
             Container(
-              height: 240,
+              height: 250,
               width: double.infinity,
               decoration: BoxDecoration(
                 color: const Color(0xFF070B12),
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(
-                  color: const Color(0xFF8B5CF6).withOpacity(0.5),
+                  color: const Color(0xFF8B5CF6).withOpacity(0.6),
                   width: 1.5,
                 ),
                 boxShadow: [
                   BoxShadow(
-                    color: const Color(0xFF8B5CF6).withOpacity(0.12),
+                    color: const Color(0xFF8B5CF6).withOpacity(0.15),
                     blurRadius: 16,
                   ),
                 ],
@@ -2670,32 +2802,52 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
                 borderRadius: BorderRadius.circular(13),
                 child: LayoutBuilder(
                   builder: (context, constraints) {
-                    final currentMon = (_conn.lastStatus?.monitors.length ?? 0) > 1
-                        ? _conn.lastStatus!.monitors[1]
-                        : null;
-                    final pcWidth = currentMon?.width ?? (_conn.lastStatus?.screenWidth ?? 1920);
-                    final pcHeight = currentMon?.height ?? (_conn.lastStatus?.screenHeight ?? 1080);
+                    final currentMon = monitors.length > thirdMonIdx ? monitors[thirdMonIdx] : null;
+                    final pcWidth = currentMon?.width ?? 1920;
+                    final pcHeight = currentMon?.height ?? 1080;
 
-                    return GestureDetector(
-                      onTapDown: (details) {
-                        HapticFeedback.lightImpact();
-                        final localX = details.localPosition.dx;
-                        final localY = details.localPosition.dy;
-                        final targetX = (localX / constraints.maxWidth * pcWidth).clamp(0, pcWidth).round();
-                        final targetY = (localY / constraints.maxHeight * pcHeight).clamp(0, pcHeight).round();
-                        _conn.sendMouseAbs(targetX, targetY, click: 'left', monitor: 1);
+                    return Listener(
+                      behavior: HitTestBehavior.opaque,
+                      onPointerDown: (event) {
+                        _pointerDownPos = event.localPosition;
+                        _pointerDownTime = DateTime.now();
+                        final targetX = (event.localPosition.dx / constraints.maxWidth * pcWidth).clamp(0, pcWidth).round();
+                        final targetY = (event.localPosition.dy / constraints.maxHeight * pcHeight).clamp(0, pcHeight).round();
+                        _lastDirectTouchX = targetX.toDouble();
+                        _lastDirectTouchY = targetY.toDouble();
                       },
-                      onDoubleTap: () {
-                        HapticFeedback.mediumImpact();
-                        _conn.sendMouseClick('double');
+                      onPointerMove: (event) {
+                        if (_pointerDownPos == null) return;
+                        final dist = (event.localPosition - _pointerDownPos!).distance;
+                        if (dist > 14.0) {
+                          final targetX = (event.localPosition.dx / constraints.maxWidth * pcWidth).clamp(0, pcWidth).round();
+                          final targetY = (event.localPosition.dy / constraints.maxHeight * pcHeight).clamp(0, pcHeight).round();
+                          _lastDirectTouchX = targetX.toDouble();
+                          _lastDirectTouchY = targetY.toDouble();
+                          _conn.sendMouseAbs(targetX, targetY, monitor: thirdMonIdx);
+                        }
                       },
-                      onLongPressStart: (details) {
-                        HapticFeedback.heavyImpact();
-                        final localX = details.localPosition.dx;
-                        final localY = details.localPosition.dy;
-                        final targetX = (localX / constraints.maxWidth * pcWidth).clamp(0, pcWidth).round();
-                        final targetY = (localY / constraints.maxHeight * pcHeight).clamp(0, pcHeight).round();
-                        _conn.sendMouseAbs(targetX, targetY, click: 'right', monitor: 1);
+                      onPointerUp: (event) {
+                        final downPos = _pointerDownPos ?? event.localPosition;
+                        final downTime = _pointerDownTime ?? DateTime.now();
+                        final dist = (event.localPosition - downPos).distance;
+                        final elapsedMs = DateTime.now().difference(downTime).inMilliseconds;
+                        final targetX = (event.localPosition.dx / constraints.maxWidth * pcWidth).clamp(0, pcWidth).round();
+                        final targetY = (event.localPosition.dy / constraints.maxHeight * pcHeight).clamp(0, pcHeight).round();
+                        _lastDirectTouchX = targetX.toDouble();
+                        _lastDirectTouchY = targetY.toDouble();
+
+                        if (dist < 28.0) {
+                          if (elapsedMs >= 450) {
+                            HapticFeedback.heavyImpact();
+                            _conn.sendMouseAbs(targetX, targetY, click: 'right', monitor: thirdMonIdx);
+                          } else {
+                            HapticFeedback.lightImpact();
+                            _conn.sendMouseAbs(targetX, targetY, click: 'left', monitor: thirdMonIdx);
+                          }
+                        }
+                        _pointerDownPos = null;
+                        _pointerDownTime = null;
                       },
                       child: Stack(
                         fit: StackFit.expand,
@@ -2718,7 +2870,7 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
                                   const SizedBox(height: 12),
                                   Text(
                                     _isConnected
-                                        ? "🖥️ Windows 2. Ekran Yayını Alınıyor..."
+                                        ? "📱 Bağımsız 3. Monitör Yayını Alınıyor..."
                                         : "⚠️ PC Bağlantısı Yok",
                                     style: const TextStyle(fontSize: 12, color: Colors.white70, fontWeight: FontWeight.bold),
                                   ),
@@ -2734,15 +2886,17 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
                               decoration: BoxDecoration(
                                 color: Colors.black.withOpacity(0.75),
                                 borderRadius: BorderRadius.circular(6),
-                                border: Border.all(color: const Color(0xFF8B5CF6).withOpacity(0.4)),
+                                border: Border.all(color: const Color(0xFF8B5CF6).withOpacity(0.5)),
                               ),
-                              child: const Row(
+                              child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Icon(Icons.tv, size: 12, color: Color(0xFFC084FC)),
-                                  SizedBox(width: 4),
-                                  Text("2. MONİTÖR CANLI",
-                                      style: TextStyle(fontSize: 9.5, color: Colors.white, fontWeight: FontWeight.bold)),
+                                  const Icon(Icons.add_to_queue, size: 12, color: Color(0xFFC084FC)),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    "BAĞIMSIZ ${thirdMonIdx + 1}. MONİTÖR (${pcWidth}x$pcHeight)",
+                                    style: const TextStyle(fontSize: 9.5, color: Colors.white, fontWeight: FontWeight.bold),
+                                  ),
                                 ],
                               ),
                             ),
@@ -2761,7 +2915,7 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
                                   border: Border.all(color: const Color(0xFF8B5CF6).withOpacity(0.4)),
                                 ),
                                 child: const Text(
-                                  "👆 Dokunarak 2. ekrandaki pencereleri doğrudan kontrol edin",
+                                  "👆 1. ve 2. monitördeki işinizi bölmeden 3. monitöre dokunun",
                                   style: TextStyle(fontSize: 9.5, color: Color(0xFFC084FC), fontWeight: FontWeight.w500),
                                 ),
                               ),
@@ -2774,9 +2928,80 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
                 ),
               ),
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 10),
 
-            // 3-Step Windows Multi-Monitor & Virtual Display Guide Card
+            // Dedicated 3rd Monitor Music & Media Control Strip
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0F172A),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFF8B5CF6).withOpacity(0.35)),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Row(
+                    children: [
+                      Icon(Icons.music_note, size: 16, color: Color(0xFFC084FC)),
+                      SizedBox(width: 4),
+                      Text(
+                        "Şarkı / Medya:",
+                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white),
+                      ),
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.skip_previous, color: Colors.white, size: 20),
+                        onPressed: () {
+                          HapticFeedback.lightImpact();
+                          _conn.sendMediaAction('prev');
+                        },
+                      ),
+                      Container(
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF8B5CF6),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: IconButton(
+                          icon: const Icon(Icons.play_arrow, color: Colors.white, size: 20),
+                          onPressed: () {
+                            HapticFeedback.mediumImpact();
+                            _conn.sendMediaAction('play_pause');
+                          },
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.skip_next, color: Colors.white, size: 20),
+                        onPressed: () {
+                          HapticFeedback.lightImpact();
+                          _conn.sendMediaAction('next');
+                        },
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.volume_down, color: Colors.white70, size: 18),
+                        onPressed: () {
+                          HapticFeedback.lightImpact();
+                          _conn.sendMediaAction('vol_down');
+                        },
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.volume_up, color: AppTheme.accentCyan, size: 18),
+                        onPressed: () {
+                          HapticFeedback.lightImpact();
+                          _conn.sendMediaAction('vol_up');
+                        },
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // 3-Monitor Layout Guide Card
             Container(
               padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
@@ -2791,27 +3016,27 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
                     children: [
                       Icon(Icons.auto_stories, color: Color(0xFF00F2FE), size: 18),
                       SizedBox(width: 8),
-                      Text("💡 Windows 2. Ekran Kullanım & Kurulum Rehberi",
+                      Text("💡 3 Monitörlü Çalışma Düzeni Nasıl Çalışır?",
                           style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12.5, color: Colors.white)),
                     ],
                   ),
                   const SizedBox(height: 10),
                   _buildGuideStepItem(
                     "1",
-                    "Windows'ta Ekranı Genişletin (Extend)",
-                    "Klavyenizden 'Win + P' tuşlarına basın ve açılan menüden 'Uzat' (Extend) seçeneğini seçin.",
+                    "1. Monitör (Kodlama) & 2. Monitör (Video Render)",
+                    "Bilgisayarınızdaki fiziksel 1. ve 2. monitörleriniz tamamen kendi işlerinize ayrılır.",
                   ),
                   const SizedBox(height: 8),
                   _buildGuideStepItem(
                     "2",
-                    "Pencereleri Yan Ekrana Taşıyın",
-                    "PC'nizdeki herhangi bir programı (Chrome, YouTube, Spotify, VS Code) farenizle ana ekranın sağına doğru sürükleyip bırakın; doğrudan bu ekrana geçecektir!",
+                    "3. Monitör: Telefonunuz (Müzik / Yan Ekran)",
+                    "Yukarıdaki '🎵 Spotify' veya '🎶 YouTube Müzik' butonuna bastığınızda uygulama doğrudan 3. monitör olan telefonunuza gelir.",
                   ),
                   const SizedBox(height: 8),
                   _buildGuideStepItem(
                     "3",
-                    "Sanal Monitör (Virtual Display)",
-                    "PC'nizde 2. bir fiziksel kablo takılı değilse, ücretsiz açık kaynak 'Virtual Display Driver' ile Windows'a anında sanal bir 2. monitör ekleyebilirsiniz.",
+                    "Odak Koruma (Focus Guard)",
+                    "Telefonunuzdaki 3. monitöre dokunup şarkı değiştirdiğinizde, 1. monitördeki kodlama imleciniz ve pencere odağınız bozulmaz!",
                   ),
                 ],
               ),
@@ -3833,8 +4058,8 @@ class _MobileControllerScreenState extends State<MobileControllerScreen>
         children: [
           _buildDockItem(0, Icons.link, "Giriş"),
           _buildDockItem(1, Icons.touch_app, "Trackpad"),
-          _buildDockItem(2, Icons.desktop_windows, "1. Ekran"),
-          _buildDockItem(3, Icons.picture_in_picture_alt, "2. Ekran/Yan Panel", isSpecial: true),
+          _buildDockItem(2, Icons.cast_connected, "Yansıtma"),
+          _buildDockItem(3, Icons.add_to_queue, "Yeni Monitör", isSpecial: true),
           _buildDockItem(4, Icons.keyboard, "Klavye"),
           _buildDockItem(5, Icons.grid_view, "Stream Deck"),
           _buildDockItem(6, Icons.music_note, "Medya/Güç"),

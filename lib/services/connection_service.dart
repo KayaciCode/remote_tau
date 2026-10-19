@@ -26,6 +26,7 @@ class HostStatus {
   final bool isAuthenticated;
   final bool isTunnelActive;
   final String tunnelUrl;
+  final bool virtualMonitorActive;
 
   HostStatus({
     required this.isOnline,
@@ -46,6 +47,7 @@ class HostStatus {
     this.isAuthenticated = false,
     this.isTunnelActive = false,
     this.tunnelUrl = "",
+    this.virtualMonitorActive = false,
   });
 
   factory HostStatus.fromJson(Map<String, dynamic> json) {
@@ -74,6 +76,7 @@ class HostStatus {
       isAuthenticated: json['is_authenticated'] ?? false,
       isTunnelActive: json['is_tunnel_active'] ?? false,
       tunnelUrl: json['tunnel_url'] ?? "",
+      virtualMonitorActive: json['virtual_monitor_active'] ?? (monList.length >= 3),
     );
   }
 }
@@ -542,13 +545,44 @@ class ConnectionService {
     );
   }
 
-  void moveAppToMonitor(String app, {int monitor = 1}) {
+  void moveAppToMonitor(String app, {int monitor = 2}) {
     if (isDemoMode) return;
     final encoded = Uri.encodeComponent(app);
     http.get(
       Uri.parse(_url('/api/monitors/move_app?app=$encoded&monitor=$monitor')),
       headers: authHeaders,
     );
+  }
+
+  Future<bool> enableVirtualMonitor() async {
+    if (isDemoMode) return true;
+    try {
+      final res = await http
+          .get(Uri.parse(_url('/api/monitors/virtual/enable')), headers: authHeaders)
+          .timeout(const Duration(seconds: 7));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        await checkConnection();
+        return data['virtual_active'] == true;
+      }
+    } catch (_) {}
+    await checkConnection();
+    return (lastStatus?.monitors.length ?? 0) >= 3;
+  }
+
+  Future<bool> disableVirtualMonitor() async {
+    if (isDemoMode) return false;
+    try {
+      final res = await http
+          .get(Uri.parse(_url('/api/monitors/virtual/disable')), headers: authHeaders)
+          .timeout(const Duration(seconds: 6));
+      if (res.statusCode == 200) {
+        await checkConnection();
+        return false;
+      }
+    } catch (_) {}
+    await checkConnection();
+    return (lastStatus?.monitors.length ?? 0) >= 3;
   }
 
   // --- Media & Power APIs ---
